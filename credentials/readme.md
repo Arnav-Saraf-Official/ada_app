@@ -44,7 +44,7 @@ You will need to create oauth consent credentials in order to use gmail api.
 4. Give it a name (e.g. `Gmail Desktop Client`), then click **Create**.
 5. On the next screen, click **Download JSON** — this is your `credentials.json` file.
 
-💾 **Save the file as `credentials.json`** in your project folder.
+💾 **Save the file as `credentials.json`** in **THIS** folder.
 
 ---
 
