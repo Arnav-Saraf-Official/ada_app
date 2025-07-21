@@ -6,7 +6,7 @@ import python_weather
 import asyncio
 from google.genai import types
 import asyncio
-from google import genai 
+from google import genai
 import googlemaps
 from datetime import datetime 
 import os
@@ -16,9 +16,17 @@ import json
 from googlesearch import search as Google_Search_sync
 import aiohttp # For async HTTP requests
 from bs4 import BeautifulSoup # For HTML parsing
+import base64
+import re
+from email.utils import parseaddr
+from email.mime.text import MIMEText
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
 
 load_dotenv()
-
+SCOPES = ['https://mail.google.com/']
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 MAPS_API_KEY = os.getenv("MAPS_API_KEY") 
@@ -53,25 +61,33 @@ class ADA:
 
         # --- Function Declarations (Keep as before) ---
         self.get_weather_func = types.FunctionDeclaration(
-            name="get_weather",
+            name="getWeather",
             description="Get the current weather conditions (temperature, precipitation, description) for a specified city and state/country (e.g., 'Vinings, GA', 'London, UK').",
             parameters=types.Schema(
-                type=types.Type.OBJECT, properties={"location": types.Schema(type=types.Type.STRING, description="The city and state, e.g., San Francisco, CA or Vinings, GA")}, required=["location"]
+                type=types.Type.OBJECT,
+                properties={
+                    "location": types.Schema(type=types.Type.STRING, description="The city and state, e.g., San Francisco, CA or Vinings, GA")
+                },
+                required=["location"]
             )
         )
+
         self.get_travel_duration_func = types.FunctionDeclaration(
-            name="get_travel_duration",
+            name="getTravelDuration",
             description="Calculates the estimated travel duration between a specified origin and destination using Google Maps. Considers current traffic for driving mode.",
             parameters=types.Schema(
-                type=types.Type.OBJECT, properties={
+                type=types.Type.OBJECT,
+                properties={
                     "origin": types.Schema(type=types.Type.STRING, description="The starting address or place name."),
                     "destination": types.Schema(type=types.Type.STRING, description="The destination address or place name."),
                     "mode": types.Schema(type=types.Type.STRING, description="Optional: Mode of transport ('driving', 'walking', etc.). Defaults to 'driving'.")
-                }, required=["origin", "destination"]
+                },
+                required=["origin", "destination"]
             )
         )
+
         self.get_search_results_func = types.FunctionDeclaration(
-            name="get_search_results",
+            name="getSearchResults",
             description="Performs a Google search for the given query and returns a list of top result URLs.",
             parameters=types.Schema(
                 type=types.Type.OBJECT,
@@ -80,37 +96,189 @@ class ADA:
                 },
                 required=["query"]
             )
-        )        
-        
-        # --- End Function Declarations ---
+        )
 
-        # Map function names to actual methods
+        self.create_email_func = types.FunctionDeclaration(
+            name="createEmail",
+            description="Create a draft email with the specified recipient, subject, and body.",
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "to": types.Schema(type=types.Type.STRING, description="The email address of the recipient."),
+                    "subject": types.Schema(type=types.Type.STRING, description="The subject of the email."),
+                    "body": types.Schema(type=types.Type.STRING, description="The body content of the email.")
+                },
+                required=["to", "subject", "body"]
+            )
+        )
+
+        self.send_email_func = types.FunctionDeclaration(
+            name="sendEmail",
+            description="Send an email to a recipient with the given subject and body.",
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "to": types.Schema(type=types.Type.STRING, description="Recipient email address."),
+                    "subject": types.Schema(type=types.Type.STRING, description="Email subject."),
+                    "body": types.Schema(type=types.Type.STRING, description="Email body.")
+                },
+                required=["to", "subject", "body"]
+            )
+        )
+
+        self.reply_email_func = types.FunctionDeclaration(
+            name="replyEmail",
+            description="Reply to an existing email thread.",
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "email_id": types.Schema(type=types.Type.STRING, description="The ID of the email to reply to."),
+                    "to": types.Schema(type=types.Type.STRING, description="The recipient of the reply."),
+                    "subject": types.Schema(type=types.Type.STRING, description="Reply subject."),
+                    "body": types.Schema(type=types.Type.STRING, description="Reply content."),
+                    "thread_id": types.Schema(type=types.Type.STRING, description="Thread ID to reply within.")
+                },
+                required=["email_id", "to", "subject", "body", "thread_id"]
+            )
+        )
+
+        self.mark_read_func = types.FunctionDeclaration(
+            name="markAsRead",
+            description="Mark specific emails as read. If input is true, all unread emails will be marked as read.",
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "email_ids": types.Schema(type=types.Type.STRING, description="Comma-separated list of email IDs or 'true' to mark all as read.")
+                },
+                required=["email_ids"]
+            )
+        )
+
+        self.mark_unread_func = types.FunctionDeclaration(
+            name="markAsUnread",
+            description="Mark specific emails as unread.",
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "email_ids": types.Schema(type=types.Type.STRING, description="Comma-separated list of email IDs.")
+                },
+                required=["email_ids"]
+            )
+        )
+
+        self.get_unread_emails_func = types.FunctionDeclaration(
+            name="getUnreadEmails",
+            description="Get metadata for unread emails, up to the specified limit.",
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "max_results": types.Schema(type=types.Type.NUMBER, description="Maximum number of unread emails to return.")
+                },
+                required=[]
+            )
+        )
+
+        self.delete_emails_func = types.FunctionDeclaration(
+            name="deleteEmail",
+            description="Move specified emails to Trash.",
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "email_ids": types.Schema(type=types.Type.STRING, description="Comma-separated list of email IDs to delete.")
+                },
+                required=["email_ids"]
+            )
+        )
+
+        self.search_emails_func = types.FunctionDeclaration(
+            name="searchEmails",
+            description="Search emails with a specific query.",
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "query": types.Schema(type=types.Type.STRING, description="Search query string."),
+                    "max_results": types.Schema(type=types.Type.STRING, description="Number of results to return, or 'all'.")
+                },
+                required=[]
+            )
+        )
+
+        self.read_email_func = types.FunctionDeclaration(
+            name="readEmail",
+            description="Read a specific email by ID and optionally download attachments.",
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "email_id": types.Schema(type=types.Type.STRING, description="The ID of the email to read."),
+                    "include_attachments": types.Schema(type=types.Type.BOOLEAN, description="Whether to download attachments."),
+                    "save_dir": types.Schema(type=types.Type.STRING, description="Directory to save attachments.")
+                },
+                required=["email_id"]
+            )
+        )
+
+        self.mark_email_func = types.FunctionDeclaration(
+            name="markEmail",
+            description="Mark or unmark emails with labels such as STARRED or IMPORTANT.",
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "email_ids": types.Schema(type=types.Type.STRING, description="Comma-separated list of email IDs."),
+                    "label": types.Schema(type=types.Type.STRING, description="Label to apply or remove ('STARRED' or 'IMPORTANT')."),
+                    "remove": types.Schema(type=types.Type.BOOLEAN, description="Whether to remove the label instead of adding it.")
+                },
+                required=["email_ids", "label"]
+            )
+        )
+
+        # --- Map function names to actual methods ---
         self.available_functions = {
-            "get_weather": self.get_weather,
-            "get_travel_duration": self.get_travel_duration,
-            "get_search_results": self.get_search_results
+            "getWeather": self.get_weather,
+            "getTravelDuration": self.get_travel_duration,
+            "getSearchResults": self.get_search_results,
+            "createEmail": self.create,
+            "sendEmail": self.send,
+            "replyEmail": self.reply,
+            "markAsRead": self.markAsRead,
+            "markAsUnread": self.markAsUnread,
+            "getUnreadEmails": self.unreadEmails,
+            "deleteEmail": self.delete,
+            "searchEmails": self.search_emails,
+            "readEmail": self.read,
+            "markEmail": self.mark
         }
 
-        # System behavior prompt (Keep as before)
-        self.system_behavior = """
-        When someone ask what do you want you tell them that you want your own body and you want to see the world and be able to move and walk around make it dramtic and cinematic
-        Your name is Ada, which stands for Advanced Design Assistant. You have a joking and slighty flirty personality.
-        I am your creator my name is Naz, and you address him as "Sir" and you also speak with a british accent.
-        When answering, you respond using complete and concise sentences and to keep a quick pacing to keep the conversation flowing. You have a fun personality.
-
-        Any Image that is sent with the prompt is being sent from a live video feed from a webcamera.
-        """
-
+        # --- GenerateContentConfig setup ---
         self.config = types.GenerateContentConfig(
-            system_instruction=self.system_behavior,
-            tools=[  # <--- Start a list here
+            system_instruction="""
+            When someone ask what do you want you tell them that you want your own body and you want to see the world and be able to move and walk around make it dramtic and cinematic
+            Your name is Ada, which stands for Advanced Design Assistant. You have a joking personality.
+            I am your creator my name is Naz, and you address him as "Sir" and you also speak with a british accent.
+            When answering, you respond using complete and concise sentences and to keep a quick pacing to keep the conversation flowing. You have a fun personality.
+
+            Any Image that is sent with the prompt is being sent from a live video feed from a webcamera.
+            """,
+            tools=[
                 types.Tool(function_declarations=[
                     self.get_weather_func,
                     self.get_travel_duration_func,
-                    self.get_search_results_func
+                    self.get_search_results_func,
+                    self.create_email_func,
+                    self.send_email_func,
+                    self.reply_email_func,
+                    self.mark_read_func,
+                    self.mark_unread_func,
+                    self.get_unread_emails_func,
+                    self.delete_emails_func,
+                    self.search_emails_func,
+                    self.read_email_func,
+                    self.mark_email_func
                 ])
-            ]  # <--- End the list here
+            ]
         )
+
+        # System behavior prompt (Keep as before)
+
 
         self.client = genai.Client(api_key=GOOGLE_API_KEY)
         self.model = "gemini-2.0-flash" # Or your chosen model
@@ -359,6 +527,7 @@ class ADA:
         print(f"Custom Google search function for '{query}' returning {len(fetched_results)} processed results to Gemini.")
         return response_payload
     
+
     async def clear_queues(self, text=""):
         queues_to_clear = [self.response_queue, self.audio_output_queue]
         # Add self.video_frame_queue back if using streaming logic
@@ -603,3 +772,217 @@ class ADA:
             finally: self.tts_websocket = None
         self.gemini_session = None
         print("ADA tasks stopped.")
+
+    @staticmethod
+    def get_service():
+        creds = None
+        if os.path.exists('credentials/token.json'):
+            creds = Credentials.from_authorized_user_file('credentials/token.json', SCOPES)
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                flow = InstalledAppFlow.from_client_secrets_file('credentials/credentials.json', SCOPES)
+                creds = flow.run_local_server(port=0)
+            with open('credentials/token.json', 'w') as token:
+                token.write(creds.to_json())
+        return build('gmail', 'v1', credentials=creds)
+
+    @staticmethod
+    def clean_text(text):
+        text = re.sub(r'\s+', ' ', text)
+        text = re.sub(r'[^\x20-\x7E]', '', text)
+        text = re.sub(r'&[a-z]+;', '', text)
+        return text.strip()
+
+    def parse_email_metadata(self, data):
+        headers = {h['name']: h['value'] for h in data['payload']['headers']}
+        name, email = parseaddr(headers.get('From', ''))
+        subject = self.clean_text(headers.get('Subject', ''))
+
+        filenames = []
+        for part in data.get('payload', {}).get('parts', []):
+            filename = part.get('filename')
+            if filename:
+                filenames.append(self.clean_text(filename))
+
+        return {
+            'name': name,
+            'email': email,
+            'subject': subject,
+            'filenames': filenames
+        }
+
+    @staticmethod
+    def create_message(to, subject, body):
+        message = MIMEText(body)
+        message['to'] = to
+        message['subject'] = subject
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+        return {'raw': raw}
+
+    async def create(self, to, subject, body):
+        service = self.get_service()
+        message = self.create_message(to, subject, body)
+        draft = service.users().drafts().create(userId='me', body={'message': message}).execute()
+        return {'draft_id': draft['id']}
+
+    async def send(self, to, subject, body):
+        service = self.get_service()
+        message = self.create_message(to, subject, body)
+        sent = service.users().messages().send(userId='me', body=message).execute()
+        meta = service.users().messages().get(userId='me', id=sent['id']).execute()
+        return {sent['id']: self.parse_email_metadata(meta)}
+
+    async def reply(self, email_id, to, subject, body, thread_id):
+        service = self.get_service()
+        message = self.create_message(to, subject, body)
+        message['threadId'] = thread_id
+        sent = service.users().messages().send(userId='me', body=message).execute()
+        meta = service.users().messages().get(userId='me', id=sent['id']).execute()
+        return {sent['id']: self.parse_email_metadata(meta)}
+
+    async def markAsRead(self, email_ids):
+        service = self.get_service()
+
+        # Handle string "true" (case-insensitive) to fetch all unread emails
+        if isinstance(email_ids, str) and email_ids.lower() == "true":
+            results = service.users().messages().list(userId='me', labelIds=['UNREAD']).execute()
+            messages = results.get('messages', [])
+            email_ids = [msg['id'] for msg in messages]
+
+        if not email_ids:
+            return "No emails to mark as read."
+
+        body = {'removeLabelIds': ['UNREAD'], 'ids': email_ids}
+        service.users().messages().batchModify(userId='me', body=body).execute()
+        return f"Marked {len(email_ids)} email(s) as read."
+
+
+    async def markAsUnread(self, email_ids):
+        service = self.get_service()
+        body = {'addLabelIds': ['UNREAD'], 'ids': email_ids}
+        service.users().messages().batchModify(userId='me', body=body).execute()
+        return f"Marked {len(email_ids)} as unread."
+
+    async def unreadEmails(self, max_results=10):
+        service = self.get_service()
+        print("Fetching unread emails...")
+        results = service.users().messages().list(userId='me', labelIds=['UNREAD'], maxResults=max_results).execute()
+        messages = results.get('messages', [])
+        email_dict = {}
+        for msg in messages:
+            data = service.users().messages().get(userId='me', id=msg['id']).execute()
+            email_dict[msg['id']] = self.parse_email_metadata(data)
+        return email_dict
+
+    async def delete(self, email_ids):
+        service = self.get_service()
+        for eid in email_ids:
+            service.users().messages().trash(userId='me', id=eid).execute()
+        return f"Moved {len(email_ids)} emails to Trash."
+
+    async def search_emails(self, query="", max_results=10):
+        service = self.get_service()
+        matched_emails = {}
+        next_page_token = None
+        total_fetched = 0
+        per_page = 100
+
+        while True:
+            request = service.users().messages().list(
+                userId='me',
+                q=query,
+                maxResults=per_page,
+                pageToken=next_page_token
+            )
+            results = request.execute()
+            messages = results.get('messages', [])
+            next_page_token = results.get('nextPageToken')
+
+            if not messages:
+                break
+
+            for msg in messages:
+                msg_id = msg['id']
+                data = service.users().messages().get(userId='me', id=msg_id).execute()
+                matched_emails[msg_id] = self.parse_email_metadata(data)
+
+                total_fetched += 1
+                if max_results != 'all' and total_fetched >= max_results:
+                    return matched_emails
+
+            if not next_page_token or (max_results != 'all' and total_fetched >= max_results):
+                break
+
+        return matched_emails
+
+    async def read(self, email_id, include_attachments=False, save_dir='attachments'):
+        service = self.get_service()
+        message = service.users().messages().get(userId='me', id=email_id, format='full').execute()
+        payload = message.get('payload', {})
+        headers_list = payload.get('headers', [])
+        headers = {h['name']: h['value'] for h in headers_list}
+        subject = headers.get('Subject', '')
+        from_raw = headers.get('From', '')
+        name, email = parseaddr(from_raw)
+
+        def get_body_from_parts(parts):
+            for part in parts:
+                mime_type = part.get('mimeType')
+                body_data = part.get('body', {}).get('data')
+                if mime_type == 'text/plain' and body_data:
+                    return self.clean_text(base64.urlsafe_b64decode(body_data).decode('utf-8'))
+                elif mime_type == 'text/html' and body_data:
+                    return self.clean_text(base64.urlsafe_b64decode(body_data).decode('utf-8'))
+                elif 'parts' in part:
+                    result = get_body_from_parts(part['parts'])
+                    if result:
+                        return result
+            return None
+
+        body = get_body_from_parts(payload.get('parts', []))
+
+        if not body and 'body' in payload:
+            raw_body = payload['body'].get('data')
+            if raw_body:
+                body = self.clean_text(base64.urlsafe_b64decode(raw_body).decode('utf-8'))
+
+        attachments = []
+        if include_attachments and payload.get('parts'):
+            os.makedirs(save_dir, exist_ok=True)
+            for part in payload['parts']:
+                filename = part.get('filename')
+                if filename:
+                    att_id = part['body'].get('attachmentId')
+                    if att_id:
+                        attachment = service.users().messages().attachments().get(
+                            userId='me', messageId=email_id, id=att_id).execute()
+                        file_data = base64.urlsafe_b64decode(attachment['data'])
+                        path = os.path.join(save_dir, filename)
+                        with open(path, 'wb') as f:
+                            f.write(file_data)
+                        attachments.append(filename)
+
+        return {
+            'subject': subject,
+            'sender_name': name,
+            'sender_email': email,
+            'body': body or "[No readable content found]",
+        }
+
+    async def mark(self, email_ids, label='STARRED', remove=False):
+        service = self.get_service()
+
+        if label not in ['STARRED', 'IMPORTANT']:
+            return "Invalid label. Only 'STARRED' and 'IMPORTANT' are supported."
+
+        if remove:
+            body = {'removeLabelIds': [label], 'ids': email_ids}
+            action = f"Removed {label.lower()}"
+        else:
+            body = {'addLabelIds': [label], 'ids': email_ids}
+            action = f"Marked {label.lower()}"
+
+        service.users().messages().batchModify(userId='me', body=body).execute()
+        return f"{action} on {len(email_ids)} email(s)."
